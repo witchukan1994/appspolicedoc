@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Sarabun:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <style>
+    body { font-family: 'Inter', 'Sarabun', sans-serif; background: #f8fafc; }
+    .sidebar-link.active { background: #eff6ff; color: #2563eb; border-right: 4px solid #2563eb; }
+    .loader-overlay { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); }
+  </style>
+</head>
+<body class="text-slate-700">
+
+  <aside class="fixed inset-y-0 left-0 w-64 bg-white border-r hidden md:block z-50">
+    <div class="p-6 font-bold text-xl text-blue-600 flex items-center gap-2"><i class="fas fa-shield-halved"></i> POLICE DOC</div>
+    <nav class="mt-6 space-y-1">
+      <button onclick="switchView('form')" id="l-form" class="sidebar-link w-full flex items-center gap-3 p-4 active transition-all"><i class="fas fa-file-signature"></i> <span>สร้างเอกสาร</span></button>
+      <button onclick="switchView('fields')" id="l-fields" class="sidebar-link w-full flex items-center gap-3 p-4 transition-all"><i class="fas fa-database"></i> <span>Field Manager</span></button>
+      <button onclick="switchView('history')" id="l-history" class="sidebar-link w-full flex items-center gap-3 p-4 transition-all"><i class="fas fa-history"></i> <span>ประวัติการบันทึก</span></button>
+    </nav>
+  </aside>
+
+  <main class="md:ml-64 p-4 md:p-8">
+    <div id="view-form" class="view-content">
+      <div class="flex justify-between items-center mb-6">
+        <h1 class="text-2xl font-bold">สร้างเอกสาร</h1>
+        <select id="tpl-select" onchange="loadTplFields(this.value)" class="p-2 border rounded-lg bg-white outline-none"><option value="">เลือก Template...</option></select>
+      </div>
+      <div id="form-container" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+      <button id="btn-submit" onclick="submitDoc()" class="mt-8 w-full bg-blue-600 text-white p-4 rounded-xl font-bold hidden shadow-lg hover:bg-blue-700 transition-all">สร้างเอกสาร</button>
+    </div>
+
+    <div id="view-fields" class="view-content hidden">
+      <div class="flex justify-between items-center mb-6"><h1 class="text-2xl font-bold">Field Manager</h1><button onclick="syncFields()" class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2"><i class="fas fa-sync"></i> Sync จาก Template</button></div>
+      <div class="bg-white rounded-xl shadow-sm border overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-slate-50 border-b font-bold text-slate-500"><tr><th class="p-4">Field Name</th><th class="p-4">Template</th><th class="p-4">Type</th><th class="p-4">Label</th><th class="p-4 text-center">Action</th></tr></thead><tbody id="field-table-body" class="divide-y"></tbody></table></div>
+    </div>
+
+    <div id="view-history" class="view-content hidden">
+      <h1 class="text-2xl font-bold mb-6">ประวัติการบันทึก</h1>
+      <div id="history-list" class="space-y-3"></div>
+    </div>
+  </main>
+
+  <div id="global-loader" class="fixed inset-0 loader-overlay z-[100] hidden flex flex-col items-center justify-center text-white">
+    <div class="w-10 h-10 border-4 border-white/20 border-t-white rounded-full animate-spin mb-4"></div>
+    <span>กำลังประมวลผล...</span>
+  </div>
+
+<script>
+  let masterFields = [];
+
+  window.onload = () => {
+    showLoader(true);
+    google.script.run.withSuccessHandler(res => {
+      const select = document.getElementById('tpl-select');
+      res.forEach(t => select.add(new Option(t.replace('TPL_',''), t)));
+      refreshMasterData();
+    }).getTemplates();
+  };
+
+  function refreshMasterData() {
+    google.script.run.withSuccessHandler(data => { masterFields = data; renderTable(); showLoader(false); }).getAllMasterFields();
+  }
+
+ function loadTplFields(tpl) {
+  if(!tpl) return;
+  showLoader(true);
+  const container = document.getElementById('form-container');
+  container.innerHTML = '';
+  
+  // 1. กรองฟิลด์เฉพาะ Template นี้
+  const allFieldsInTpl = masterFields.filter(f => f.template_name === tpl);
+  
+  // 2. ✅ คัดกรองให้เหลือแต่ชื่อฟิลด์ที่ไม่ซ้ำกัน (Unique Fields)
+  const uniqueFields = [];
+  const fieldNamesSeen = new Set();
+  
+  allFieldsInTpl.forEach(f => {
+    if (!fieldNamesSeen.has(f.field_name)) {
+      fieldNamesSeen.add(f.field_name);
+      uniqueFields.push(f);
+    }
+  });
+
+  google.script.run.withSuccessHandler(lastData => {
+    if(uniqueFields.length === 0) {
+      container.innerHTML = '<p class="col-span-2 text-center p-8 text-slate-400">ยังไม่มีฟิลด์ กรุณากด Sync ใน Field Manager</p>';
+    } else {
+      uniqueFields.forEach(f => {
+        // ดึงข้อมูลล่าสุด (Auto-fill)
+        const val = (lastData && lastData[f.field_name]) ? lastData[f.field_name] : '';
+        
+        let input = `<input type="text" id="${f.field_name}" value="${val}" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">`;
+        
+        if(f.type === 'date') {
+          input = `<input type="date" id="${f.field_name}" value="${val}" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">`;
+        }
+        
+        if(f.type === 'time24') {
+           let [hVal, mVal] = val.includes('.') ? val.split('.') : ['00', '00'];
+           let h = Array.from({length:24},(_,i)=>i.toString().padStart(2,'0')).map(v=>`<option value="${v}" ${v===hVal?'selected':''}>${v}</option>`).join('');
+           let m = Array.from({length:60},(_,i)=>i.toString().padStart(2,'0')).map(v=>`<option value="${v}" ${v===mVal?'selected':''}>${v}</option>`).join('');
+           input = `<div class="flex gap-2 items-center"><select id="${f.field_name}_h" class="flex-1 p-2 border rounded-lg">${h}</select>:<select id="${f.field_name}_m" class="flex-1 p-2 border rounded-lg">${m}</select></div>`;
+        }
+        
+        container.innerHTML += `
+          <div class="space-y-1 p-1">
+            <label class="text-xs font-bold text-slate-500 flex justify-between">
+              <span>${f.description || f.field_name}</span>
+              ${val ? '<span class="text-[9px] text-blue-500 uppercase font-bold"><i class="fas fa-history"></i> ดึงล่าสุด</span>' : ''}
+            </label>
+            ${input}
+          </div>`;
+      });
+      document.getElementById('btn-submit').classList.remove('hidden');
+    }
+    showLoader(false);
+  }).getLastEntryData();
+}
+
+  function renderTable() {
+    const tbody = document.getElementById('field-table-body');
+    tbody.innerHTML = masterFields.map((f, i) => {
+      const isDup = i > 0 && masterFields[i-1].field_name === f.field_name;
+      return `<tr class="${isDup ? 'bg-blue-50/20' : 'bg-white'} border-b hover:bg-slate-50">
+          <td class="p-4 font-mono text-xs ${isDup ? 'text-slate-400' : 'text-blue-600 font-bold'}">${isDup ? '(Shared)' : f.field_name}</td>
+          <td class="p-4 text-xs font-bold text-slate-400 uppercase">${f.template_name.replace('TPL_','')}</td>
+          <td class="p-4"><select onchange="updateF(${f.id}, 'type', this.value)" class="text-xs border rounded p-1"><option value="text" ${f.type==='text'?'selected':''}>Text</option><option value="date" ${f.type==='date'?'selected':''}>Date</option></select></td>
+          <td class="p-4"><input type="text" value="${f.description || ''}" onblur="updateF(${f.id}, 'description', this.value)" class="text-sm border-none bg-transparent w-full"></td>
+          <td class="p-4 text-center"><button onclick="deleteF(${f.id})" class="text-slate-300 hover:text-red-500"><i class="fas fa-trash-alt"></i></button></td>
+        </tr>`;
+    }).join('');
+  }
+
+  function loadHistory() {
+    google.script.run.withSuccessHandler(list => {
+      const container = document.getElementById('history-list');
+      if(list.length === 0) container.innerHTML = '<p class="p-12 text-center text-slate-400">ไม่มีประวัติ</p>';
+      else container.innerHTML = list.map(item => `<div class="bg-white p-4 rounded-xl border flex justify-between items-center shadow-sm">
+          <div><div class="font-bold text-slate-800">${item.name}</div><div class="text-[10px] text-slate-400 font-bold">${item.tpl} | ${item.timestamp}</div></div>
+          <div class="flex gap-2">
+            <button onclick="handleExportPdf('${item.name}')" class="p-2 px-4 bg-red-600 text-white rounded-lg text-xs font-bold"><i class="fas fa-file-pdf"></i> PDF</button>
+            <button onclick="handleDeleteDoc(${item.id}, '${item.name}')" class="p-2 px-3 bg-slate-100 text-slate-400 rounded-lg text-xs hover:bg-red-500 hover:text-white transition-all"><i class="fas fa-trash"></i></button>
+          </div></div>`).join('');
+    }).getDocumentList();
+  }
+
+  function handleExportPdf(name) {
+    showLoader(true);
+    google.script.run.withSuccessHandler(res => {
+      showLoader(false);
+      if(res.status === 'success') {
+        Swal.fire({
+          title: 'พร้อมส่งออก',
+          text: 'กดเพื่อเปิดหน้าตั้งค่าการพิมพ์',
+          icon: 'info',
+          showCancelButton: true,
+          confirmButtonText: 'เปิดหน้าดาวน์โหลด',
+          confirmButtonColor: '#e11d48'
+        }).then((result) => { if (result.isConfirmed) window.open(res.url, '_blank'); });
+      }
+    }).getPdfUrl(name);
+  }
+
+  function submitDoc() {
+    const tpl = document.getElementById('tpl-select').value;
+    const data = {};
+    masterFields.filter(f => f.template_name === tpl).forEach(f => { data[f.field_name] = document.getElementById(f.field_name).value; });
+    showLoader(true);
+    google.script.run.withSuccessHandler(res => { showLoader(false); Swal.fire('สำเร็จ', `สร้างชีท "${res.sheetName}" แล้ว`, 'success'); }).processFormSubmission(data, tpl);
+  }
+
+  function syncFields() { 
+    const tpl = document.getElementById('tpl-select').value; if(!tpl) return Swal.fire('เลือก Template ก่อน');
+    showLoader(true); google.script.run.withSuccessHandler(() => refreshMasterData()).syncTemplateFields(tpl); 
+  }
+
+  function updateF(id, key, val) { const f = masterFields.find(x => x.id === id); f[key] = val; google.script.run.updateMasterField(id, f); }
+  function deleteF(id) { Swal.fire({ title: 'ลบฟิลด์?', icon: 'warning', showCancelButton: true }).then(r => { if(r.isConfirmed) { showLoader(true); google.script.run.withSuccessHandler(() => refreshMasterData()).deleteMasterField(id); } }); }
+  function handleDeleteDoc(id, name) { Swal.fire({ title: 'ลบประวัติ?', icon: 'warning', showCancelButton: true }).then(r => { if(r.isConfirmed) { showLoader(true); google.script.run.withSuccessHandler(() => loadHistory()).deleteDocument(id, name); } }); }
+
+  function switchView(v) {
+    document.querySelectorAll('.view-content').forEach(x => x.classList.add('hidden'));
+    document.getElementById('view-'+v).classList.remove('hidden');
+    document.querySelectorAll('.sidebar-link').forEach(x => x.classList.remove('active'));
+    document.getElementById('l-'+v).classList.add('active');
+    if(v === 'history') loadHistory();
+  }
+
+  function showLoader(s) { document.getElementById('global-loader').classList.toggle('hidden', !s); }
+</script>
+</body>
+</html>
